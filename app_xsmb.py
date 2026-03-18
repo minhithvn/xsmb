@@ -300,6 +300,7 @@ with rule_tab:
 
     anchor_date = st.date_input("Chọn thứ 2 làm mốc", value=(datetime.date.today() - datetime.timedelta(days=datetime.date.today().weekday())))
     hist_days = st.slider("Số ngày lịch sử để thống kê", 7, 90, 30)
+    hist_weeks = st.slider("Số tuần lịch sử để ước tính tuần có xuất hiện", 4, 52, 12)
 
     if st.button("Phân tích quy tắc tìm số đề"):
         try:
@@ -377,6 +378,28 @@ with rule_tab:
                     else:
                         st.info("Tuần hiện tại: chưa thấy 2 số cuối ĐB thuộc 10 số mốc.")
 
+                    # Ước tính xác suất tuần có xuất hiện (dựa trên hist_weeks tuần quá khứ)
+                    week_hits = 0
+                    for w in range(hist_weeks):
+                        week_start = anchor_date - datetime.timedelta(days=7*(w+1))
+                        week_end = week_start + datetime.timedelta(days=6)
+                        hit_week = False
+                        for delta in range(7):
+                            d = week_start + datetime.timedelta(days=delta)
+                            try:
+                                res = fetch_xsmb(d)
+                                db = res.get("GDB", [])
+                                if db and db[0][-2:] in candidates:
+                                    hit_week = True
+                                    break
+                            except Exception:
+                                continue
+                        if hit_week:
+                            week_hits += 1
+                    prob = week_hits / hist_weeks if hist_weeks > 0 else 0
+                    st.subheader("Xác suất tuần có xuất hiện (ước tính)")
+                    st.write(f"Trong {hist_weeks} tuần gần nhất: {week_hits} tuần có xuất hiện ⇒ xác suất lịch sử ~ {prob:.0%}")
+
                     # Gợi ý cho các ngày còn lại trong tuần hiện tại (chỉ nếu tuần mốc là tuần hiện tại)
                     start_week = anchor_date
                     end_week = anchor_date + datetime.timedelta(days=6)
@@ -396,7 +419,7 @@ with rule_tab:
                         if pick_wd is None and weekday_hits[best_wd_overall] > 0 and best_wd_overall in remaining:
                             pick_wd = best_wd_overall
                         if pick_wd is not None:
-                            st.success(f"Gợi ý tuần này (các ngày còn lại): ưu tiên {wd_names[pick_wd]} (dựa trên lịch sử {hist_days} ngày).")
+                            st.success(f"Gợi ý tuần này (các ngày còn lại): ưu tiên {wd_names[pick_wd]} (dựa trên lịch sử {hist_days} ngày; khả năng tuần có xuất hiện ≈ {prob:.0%}).")
                     else:
                         # Không hiển thị gợi ý tuần nếu không phải tuần hiện tại
                         pass
