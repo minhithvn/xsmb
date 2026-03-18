@@ -89,20 +89,23 @@ def fetch_xsmb(date: datetime.date) -> Dict[str, List[str]]:
     raise RuntimeError("; ".join(errors))
 
 
-def aggregate_frequency(history: List[Dict[str, List[str]]]) -> Dict[str, int]:
-    freq: Dict[str, int] = {}
-    for day in history:
-        for arr in day.values():
-            for n in arr:
-                freq[n] = freq.get(n, 0) + 1
-    return freq
+def normalize_last2(result: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    """Chỉ lấy 2 chữ số cuối cho mỗi số."""
+    norm: Dict[str, List[str]] = {}
+    for k, arr in result.items():
+        norm[k] = [n[-2:].zfill(2) for n in arr if n]
+    return norm
 
 
-def aggregate_weighted(history: List[Dict[str, List[str]]], decay: float = 0.9) -> Dict[str, float]:
-    """Exponential decay by day offset: weight = decay**offset (offset=0 is selected date)."""
+def aggregate_weighted(history: List[Dict[str, List[str]]], decay: float = 0.9, day0_penalty: float = 1.0) -> Dict[str, float]:
+    """Exponential decay by day offset: weight = (decay**offset) * penalty_if_today.
+    day0_penalty < 1.0 sẽ giảm ảnh hưởng của ngày gần nhất.
+    """
     freq: Dict[str, float] = {}
     for offset, day in enumerate(history):
-        w = decay ** offset
+        w = (decay ** offset)
+        if offset == 0:
+            w *= day0_penalty
         for arr in day.values():
             for n in arr:
                 freq[n] = freq.get(n, 0.0) + w
@@ -121,50 +124,58 @@ st.title("XS Miền Bắc: kết quả & gợi ý tần suất")
 st.markdown(
     """
 - Nguồn chính: minhngoc.net.vn; dự phòng: xoso.com.vn.
-- Gợi ý số dựa trên tần suất và trọng số gần đây (chỉ thống kê, không đảm bảo trúng).
+- Gợi ý 2 chữ số dựa trên tần suất có trọng số (ưu tiên ngày gần). Không đảm bảo trúng.
     """
 )
 
 col1, col2 = st.columns(2)
 with col1:
-    date_pick = st.date_input("Chọn ngày", value=datetime.date.today())
+    date_pick = st.date_input("Chọn ngày dữ liệu cuối cùng", value=datetime.date.today())
 with col2:
     days_hist = st.slider("Số ngày lịch sử", 3, 30, 7)
 
 col3, col4 = st.columns(2)
 with col3:
-    decay = st.slider("Trọng số giảm dần (gần ngày được ưu tiên)", 0.5, 0.99, 0.9, step=0.01)
+    decay = st.slider("Trọng số giảm dần (gần ngày ưu tiên)", 0.5, 0.99, 0.9, step=0.01)
 with col4:
-    top_k = st.slider("Hiển thị top bao nhiêu số", 5, 20, 10)
+    day0_penalty = st.slider("Giảm ảnh hưởng ngày gần nhất", 0.0, 1.0, 0.2, step=0.05)
 
-if st.button("Lấy kết quả"):
+col5, col6 = st.columns(2)
+with col5:
+    top_k = st.slider("Top số hiển thị", 3, 15, 5)
+with col6:
+    show_today = st.checkbox("Hiển thị kết quả ngày chọn (đầy đủ)", value=False)
+
+if st.button("Lấy dữ liệu & gợi ý ngày tiếp theo"):
     try:
-        today_result = fetch_xsmb(date_pick)
-        st.subheader(f"Kết quả {date_pick.strftime('%d-%m-%Y')}")
-        st.json(today_result)
+        today_raw = fetch_xsmb(date_pick)
+        if show_today:
+            st.subheader(f"Kết quả đầy đủ {date_pick.strftime('%d-%m-%Y')}")
+            st.json(today_raw)
     except Exception as e:
         st.error(f"Lỗi lấy kết quả: {e}")
-        today_result = None
+        today_raw = None
 
     history = []
     for delta in range(days_hist):
         d = date_pick - datetime.timedelta(days=delta)
         try:
-            history.append(fetch_xsmb(d))
+            day_raw = fetch_xsmb(d)
+            history.append(normalize_last2(day_raw))  # chỉ lấy 2 chữ số cho phân tích
         except Exception:
             continue
 
     if not history:
         st.info("Không đủ dữ liệu lịch sử để gợi ý.")
     else:
-        freq_w = aggregate_weighted(history, decay=decay)
+        freq_w = aggregate_weighted(history, decay=decay, day0_penalty=day0_penalty)
         suggestions = suggest_numbers(freq_w, top_k=top_k)
         best_pick = suggestions[0] if suggestions else None
-        st.subheader("Gợi ý số (trọng số gần ngày hơn)")
+        st.subheader("Gợi ý 2 chữ số cho ngày tiếp theo (dựa trên lịch sử)")
         st.write(", ".join(suggestions))
         if best_pick:
-            st.markdown(f"**Gợi ý 1 số ưu tiên:** {best_pick}")
-        st.caption("Tính theo tần suất có trọng số giảm dần theo ngày (decay). Không phải tư vấn đánh số.")
+            st.markdown(f"**Ưu tiên:** {best_pick}")
+        st.caption("Gợi ý dùng 2 chữ số cuối, trọng số giảm dần theo ngày, ngày gần nhất giảm thêm hệ số (slider). Không phải tư vấn đánh số.")
 
 st.divider()
 st.caption("Nguồn: minhngoc.net.vn (chính), xoso.com.vn (dự phòng). Nếu nguồn đổi cấu trúc, cần chỉnh parser.")
