@@ -98,7 +98,18 @@ def aggregate_frequency(history: List[Dict[str, List[str]]]) -> Dict[str, int]:
     return freq
 
 
-def suggest_numbers(freq: Dict[str, int], top_k: int = 15) -> List[str]:
+def aggregate_weighted(history: List[Dict[str, List[str]]], decay: float = 0.9) -> Dict[str, float]:
+    """Exponential decay by day offset: weight = decay**offset (offset=0 is selected date)."""
+    freq: Dict[str, float] = {}
+    for offset, day in enumerate(history):
+        w = decay ** offset
+        for arr in day.values():
+            for n in arr:
+                freq[n] = freq.get(n, 0.0) + w
+    return freq
+
+
+def suggest_numbers(freq: Dict[str, float], top_k: int = 10) -> List[str]:
     sorted_nums = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))
     return [n for n, _ in sorted_nums[:top_k]]
 
@@ -109,8 +120,8 @@ st.title("XS Miền Bắc: kết quả & gợi ý tần suất")
 
 st.markdown(
     """
-- Lấy kết quả XS miền Bắc theo ngày (nguồn chính: minhngoc.net.vn; dự phòng: xoso.com.vn).
-- Gợi ý số dựa trên tần suất xuất hiện (không đảm bảo trúng – chỉ thống kê).
+- Nguồn chính: minhngoc.net.vn; dự phòng: xoso.com.vn.
+- Gợi ý số dựa trên tần suất và trọng số gần đây (chỉ thống kê, không đảm bảo trúng).
     """
 )
 
@@ -118,7 +129,13 @@ col1, col2 = st.columns(2)
 with col1:
     date_pick = st.date_input("Chọn ngày", value=datetime.date.today())
 with col2:
-    days_hist = st.slider("Số ngày lịch sử để tính tần suất", 3, 30, 7)
+    days_hist = st.slider("Số ngày lịch sử", 3, 30, 7)
+
+col3, col4 = st.columns(2)
+with col3:
+    decay = st.slider("Trọng số giảm dần (gần ngày được ưu tiên)", 0.5, 0.99, 0.9, step=0.01)
+with col4:
+    top_k = st.slider("Hiển thị top bao nhiêu số", 5, 20, 10)
 
 if st.button("Lấy kết quả"):
     try:
@@ -140,14 +157,14 @@ if st.button("Lấy kết quả"):
     if not history:
         st.info("Không đủ dữ liệu lịch sử để gợi ý.")
     else:
-        freq = aggregate_frequency(history)
-        suggestions = suggest_numbers(freq, top_k=15)
+        freq_w = aggregate_weighted(history, decay=decay)
+        suggestions = suggest_numbers(freq_w, top_k=top_k)
         best_pick = suggestions[0] if suggestions else None
-        st.subheader("Gợi ý số theo tần suất (top 15)")
+        st.subheader("Gợi ý số (trọng số gần ngày hơn)")
         st.write(", ".join(suggestions))
         if best_pick:
-            st.markdown(f"**Số tần suất cao nhất:** {best_pick}")
-        st.caption("Gợi ý chỉ mang tính thống kê, không phải tư vấn đánh số.")
+            st.markdown(f"**Gợi ý 1 số ưu tiên:** {best_pick}")
+        st.caption("Tính theo tần suất có trọng số giảm dần theo ngày (decay). Không phải tư vấn đánh số.")
 
 st.divider()
 st.caption("Nguồn: minhngoc.net.vn (chính), xoso.com.vn (dự phòng). Nếu nguồn đổi cấu trúc, cần chỉnh parser.")
