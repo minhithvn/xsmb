@@ -124,7 +124,7 @@ st.title("XS Miền Bắc: kết quả & gợi ý tần suất")
 st.markdown(
     """
 - Nguồn chính: minhngoc.net.vn; dự phòng: xoso.com.vn.
-- Gợi ý 2 chữ số dựa trên tần suất có trọng số (ưu tiên ngày gần). Không đảm bảo trúng.
+- Gợi ý 2 chữ số dựa trên tần suất có trọng số (ưu tiên ngày gần).
     """
 )
 
@@ -175,7 +175,7 @@ if st.button("Lấy dữ liệu & gợi ý ngày tiếp theo"):
         st.write(", ".join(suggestions))
         if best_pick:
             st.markdown(f"**Ưu tiên:** {best_pick}")
-        st.caption("Gợi ý dùng 2 chữ số cuối, trọng số giảm dần theo ngày, ngày gần nhất giảm thêm hệ số (slider). Không phải tư vấn đánh số.")
+        st.caption("Gợi ý dùng 2 chữ số cuối, trọng số giảm dần theo ngày, ngày gần nhất giảm thêm hệ số (slider).")
 
 st.divider()
-st.caption("Nguồn: minhngoc.net.vn (chính), xoso.com.vn (dự phòng). Nếu nguồn đổi cấu trúc, cần chỉnh parser.")
+st.caption("Nguồn: minhngoc.net.vn (chính), Chơi vui là chính")
