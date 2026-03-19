@@ -1,82 +1,27 @@
 import datetime
-import json
-import time
-from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
 # -------- Config ---------
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-}
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"}
 SOURCES = [
     "https://www.minhngoc.net.vn/ket-qua-xo-so/mien-bac/{}.html",  # dd-mm-yyyy
     "https://xoso.com.vn/xsmb-{}.html",  # dd-mm-yyyy (fallback)
 ]
-CACHE_PATH = Path(".cache/xsmb_cache.json")
-CACHE_PATH.parent.mkdir(exist_ok=True)
 
 # Prize label mapping for display order
 PRIZE_LABELS = ["GDB", "G1", "G2", "G3", "G4", "G5", "G6", "G7"]
 
-# -------- Cache helpers ---------
 
-def _load_cache() -> Dict[str, Dict]:
-    if CACHE_PATH.exists():
-        try:
-            return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
-
-
-def _save_cache(cache: Dict[str, Dict]) -> None:
-    try:
-        CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def get_cached(date: datetime.date) -> Optional[Dict[str, List[str]]]:
-    cache = _load_cache()
-    key = date.isoformat()
-    entry = cache.get(key)
-    if not entry:
-        return None
-    return entry.get("data")
-
-
-def set_cached(date: datetime.date, data: Dict[str, List[str]]) -> None:
-    cache = _load_cache()
-    cache[date.isoformat()] = {"data": data, "ts": int(time.time())}
-    _save_cache(cache)
-
-
-# -------- Fetch helpers ---------
-
-def fetch_url(url: str, retries: int = 2, backoff: float = 0.5) -> str:
-    """Fetch URL with basic retry and backoff."""
-    last_err = None
-    for attempt in range(retries + 1):
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
-            r.raise_for_status()
-            return r.text
-        except Exception as e:
-            last_err = e
-            if attempt < retries:
-                time.sleep(backoff * (2 ** attempt))
-            continue
-    raise last_err  # type: ignore
-
-
+# -------- Helpers ---------
 def fetch_from_minhngoc(date: datetime.date) -> Dict[str, List[str]]:
     url = SOURCES[0].format(date.strftime('%d-%m-%Y'))
-    html = fetch_url(url)
-    soup = BeautifulSoup(html, "html.parser")
+    r = requests.get(url, headers=HEADERS, timeout=10)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
     out: Dict[str, List[str]] = {}
 
     tbl = soup.find("table", class_="bkqmienbac")
@@ -106,8 +51,9 @@ def fetch_from_minhngoc(date: datetime.date) -> Dict[str, List[str]]:
 
 def fetch_from_xoso(date: datetime.date) -> Dict[str, List[str]]:
     url = SOURCES[1].format(date.strftime('%d-%m-%Y'))
-    html = fetch_url(url)
-    soup = BeautifulSoup(html, "html.parser")
+    r = requests.get(url, headers=HEADERS, timeout=10)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
     out: Dict[str, List[str]] = {}
     mapping = {
         "prizeDB": "GDB",
@@ -131,50 +77,35 @@ def fetch_from_xoso(date: datetime.date) -> Dict[str, List[str]]:
     return out
 
 
-def fetch_xsmb(date: datetime.date, use_cache: bool = True, force_refresh: bool = False) -> Dict[str, List[str]]:
-    # Try cache first
-    if use_cache and not force_refresh:
-        cached = get_cached(date)
-        if cached:
-            return cached
-
+def fetch_xsmb(date: datetime.date) -> Dict[str, List[str]]:
+    # Try primary, then fallback
     errors = []
     for func in (fetch_from_minhngoc, fetch_from_xoso):
         try:
-            data = func(date)
-            if use_cache:
-                set_cached(date, data)
-            return data
+            return func(date)
         except Exception as e:
             errors.append(str(e))
             continue
     raise RuntimeError("; ".join(errors))
 
 
-# -------- Analytics helpers ---------
-
-def aggregate_frequency(history: List[Dict[str, List[str]]]) -> Dict[str, int]:
-    freq: Dict[str, int] = {}
-    for day in history:
-        for arr in day.values():
-            for n in arr:
-                freq[n] = freq.get(n, 0) + 1
-    return freq
-
-
 def normalize_last2(result: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    """Take last 2 digits of every number (zero-fill)."""
+    """Chỉ lấy 2 chữ số cuối cho mỗi số."""
     norm: Dict[str, List[str]] = {}
     for k, arr in result.items():
         norm[k] = [n[-2:].zfill(2) for n in arr if n]
     return norm
 
 
-def aggregate_weighted(history: List[Dict[str, List[str]]], decay: float = 0.9) -> Dict[str, float]:
-    """Exponential decay by day offset: weight = decay**offset (offset=0 is selected date)."""
+def aggregate_weighted(history: List[Dict[str, List[str]]], decay: float = 0.9, day0_penalty: float = 1.0) -> Dict[str, float]:
+    """Exponential decay by day offset: weight = (decay**offset) * penalty_if_today.
+    day0_penalty < 1.0 sẽ giảm ảnh hưởng của ngày gần nhất.
+    """
     freq: Dict[str, float] = {}
     for offset, day in enumerate(history):
-        w = decay ** offset
+        w = (decay ** offset)
+        if offset == 0:
+            w *= day0_penalty
         for arr in day.values():
             for n in arr:
                 freq[n] = freq.get(n, 0.0) + w
@@ -186,17 +117,58 @@ def suggest_numbers(freq: Dict[str, float], top_k: int = 10) -> List[str]:
     return [n for n, _ in sorted_nums[:top_k]]
 
 
+def build_transitions(days: List[Dict[str, List[str]]]) -> Dict[str, Dict[str, int]]:
+    """Build transition counts between consecutive days for 2-digit numbers."""
+    trans: Dict[str, Dict[str, int]] = {}
+    for i in range(len(days) - 1):
+        src_day = days[i]
+        dst_day = days[i + 1]
+        src_nums = set(n for arr in src_day.values() for n in arr)
+        dst_nums = [n for arr in dst_day.values() for n in arr]
+        for s in src_nums:
+            trans.setdefault(s, {})
+            for d in dst_nums:
+                trans[s][d] = trans[s].get(d, 0) + 1
+    return trans
+
+
+def predict_next_from_transitions(trans: Dict[str, Dict[str, int]], today_nums: List[str], exclude_today: bool = False) -> List[str]:
+    scores: Dict[str, int] = {}
+    today_set = set(today_nums)
+    for s in today_nums:
+        for d, c in trans.get(s, {}).items():
+            if exclude_today and d in today_set:
+                continue
+            scores[d] = scores.get(d, 0) + c
+    return [n for n, _ in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+def combine_ensemble(freq_scores: Dict[str, float], trans_scores: Dict[str, int], alpha: float = 0.5, exclude_set=None) -> List[str]:
+    if exclude_set is None:
+        exclude_set = set()
+    all_keys = set(freq_scores.keys()) | set(trans_scores.keys())
+    combined: Dict[str, float] = {}
+    for k in all_keys:
+        if k in exclude_set:
+            continue
+        f = freq_scores.get(k, 0.0)
+        t = trans_scores.get(k, 0)
+        combined[k] = alpha * f + (1 - alpha) * t
+    return [n for n, _ in sorted(combined.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
 # -------- Streamlit UI ---------
 st.set_page_config(page_title="XSMB Checker", page_icon="🎟️", layout="centered")
 st.title("XS Miền Bắc")
 
+# Tabs
 main_tab, rule_tab = st.tabs(["Gợi ý 2 số lô", "Tìm số đề đóm"])
 
 with main_tab:
     st.markdown(
         """
 - Nguồn chính: minhngoc.net.vn; dự phòng: xoso.com.vn.
-- Gợi ý dựa trên tần suất 2 chữ số cuối, ưu tiên ngày gần (chỉ thống kê, không đảm bảo trúng).
+- Gợi ý 2 chữ số dựa trên tần suất có trọng số (ưu tiên ngày gần). Không đảm bảo trúng.
         """
     )
 
@@ -210,56 +182,111 @@ with main_tab:
     with col3:
         decay = st.slider("Trọng số giảm dần (gần ngày ưu tiên)", 0.5, 0.99, 0.9, step=0.01)
     with col4:
-        top_k = st.slider("Top số hiển thị", 3, 15, 5)
+        day0_penalty = st.slider("Giảm ảnh hưởng ngày gần nhất", 0.0, 1.0, 0.2, step=0.05)
 
     col5, col6 = st.columns(2)
     with col5:
-        use_cache = st.checkbox("Dùng cache", value=True)
+        top_k = st.slider("Top số hiển thị", 3, 15, 5)
     with col6:
-        force_refresh = st.checkbox("Làm mới dữ liệu ngày chọn", value=False)
+        show_today = st.checkbox("Hiển thị kết quả ngày chọn (đầy đủ)", value=False)
 
     col7, col8 = st.columns(2)
     with col7:
-        show_today_full = st.checkbox("Hiển thị kết quả đầy đủ ngày chọn", value=False)
+        trans_window = st.slider("Số ngày lịch sử cho chuyển tiếp", 5, 60, 30)
     with col8:
-        show_today_last2 = st.checkbox("Hiển thị 2 chữ số cuối ngày chọn", value=False)
+        exclude_today_nums = st.checkbox("Loại trừ các số đã ra hôm nay khỏi gợi ý chuyển tiếp", value=True)
 
-    if st.button("Lấy dữ liệu & gợi ý cho ngày tiếp theo"):
-        today_raw = None
+    col9, col10 = st.columns(2)
+    with col9:
+        alpha_ensemble = st.slider("Trọng số freq vs transition (alpha)", 0.0, 1.0, 0.5, step=0.05)
+    with col10:
+        exclude_last_days = st.slider("Loại trừ số đã ra trong X ngày gần nhất (ensemble)", 0, 3, 1)
+
+    if st.button("Lấy dữ liệu & gợi ý ngày tiếp theo"):
         try:
-            with st.spinner("Đang lấy dữ liệu..."):
-                today_raw = fetch_xsmb(date_pick, use_cache=use_cache, force_refresh=force_refresh)
-            today_result = normalize_last2(today_raw)
-            if show_today_full:
+            today_raw = fetch_xsmb(date_pick)
+            today_norm = normalize_last2(today_raw)
+            today_nums_flat = [n for arr in today_norm.values() for n in arr]
+            if show_today:
                 st.subheader(f"Kết quả đầy đủ {date_pick.strftime('%d-%m-%Y')}")
                 st.json(today_raw)
-            if show_today_last2:
-                st.subheader(f"Kết quả (2 chữ số cuối) {date_pick.strftime('%d-%m-%Y')}")
-                st.json(today_result)
         except Exception as e:
             st.error(f"Lỗi lấy kết quả: {e}")
-            today_result = None
+            today_raw = None
+            today_nums_flat = []
+
+        # Nếu ngày chọn là hôm nay/hiện tại trở đi, hiển thị mốc dự đoán cho ngày kế tiếp
+        today_real = datetime.date.today()
+        if date_pick >= today_real:
+            target_date = date_pick + datetime.timedelta(days=1)
+            st.info(f"Dự đoán cho ngày: {target_date.strftime('%d-%m-%Y')} (dựa trên dữ liệu đến {date_pick.strftime('%d-%m-%Y')})")
 
         history = []
         for delta in range(days_hist):
             d = date_pick - datetime.timedelta(days=delta)
             try:
-                day_raw = fetch_xsmb(d, use_cache=use_cache)
-                history.append(normalize_last2(day_raw))
+                day_raw = fetch_xsmb(d)
+                history.append(normalize_last2(day_raw))  # chỉ lấy 2 chữ số cho phân tích
             except Exception:
                 continue
 
         if not history:
             st.info("Không đủ dữ liệu lịch sử để gợi ý.")
         else:
-            freq_w = aggregate_weighted(history, decay=decay)
+            # Gợi ý tần suất trọng số
+            freq_w = aggregate_weighted(history, decay=decay, day0_penalty=day0_penalty)
             suggestions = suggest_numbers(freq_w, top_k=top_k)
             best_pick = suggestions[0] if suggestions else None
-            st.subheader("Gợi ý 2 chữ số cho ngày tiếp theo")
+            st.subheader("Gợi ý 2 chữ số (tần suất trọng số)")
             st.write(", ".join(suggestions))
             if best_pick:
                 st.markdown(f"**Ưu tiên:** {best_pick}")
-            st.caption("Dựa trên tần suất 2 chữ số cuối, có trọng số giảm dần theo ngày. Không phải tư vấn đánh số.")
+            st.caption("Gợi ý dùng 2 chữ số cuối, trọng số giảm dần theo ngày, ngày gần nhất giảm thêm hệ số (slider). Không phải tư vấn đánh số.")
+
+            # Gợi ý theo chuyển tiếp
+            trans_history = []
+            for delta in range(trans_window):
+                d = date_pick - datetime.timedelta(days=delta)
+                try:
+                    day_raw = fetch_xsmb(d)
+                    trans_history.append(normalize_last2(day_raw))
+                except Exception:
+                    continue
+            trans = build_transitions(trans_history)
+            trans_scores = predict_next_from_transitions(trans, today_nums_flat, exclude_today=exclude_today_nums)
+            st.subheader("Gợi ý theo chuyển tiếp (từ hôm nay sang ngày tiếp theo)")
+            if trans_scores:
+                st.write(", ".join(trans_scores[:5]))
+                st.markdown(f"**Ưu tiên (transitions):** {trans_scores[0]}")
+            else:
+                st.info("Không đủ dữ liệu chuyển tiếp để gợi ý.")
+
+            # Ensemble freq + transition
+            # freq_w is a score dict; build trans score dict
+            trans_score_dict = {}
+            for s in today_nums_flat:
+                for d, c in trans.get(s, {}).items():
+                    trans_score_dict[d] = trans_score_dict.get(d, 0) + c
+
+            exclude_set = set()
+            if exclude_last_days > 0:
+                for delta in range(exclude_last_days):
+                    d = date_pick - datetime.timedelta(days=delta)
+                    try:
+                        day_raw = fetch_xsmb(d)
+                        norm = normalize_last2(day_raw)
+                        for arr in norm.values():
+                            exclude_set.update(arr)
+                    except Exception:
+                        continue
+
+            ensemble = combine_ensemble(freq_w, trans_score_dict, alpha=alpha_ensemble, exclude_set=exclude_set)
+            st.subheader("Gợi ý ensemble (freq + transition)")
+            if ensemble:
+                st.write(", ".join(ensemble[:5]))
+                st.markdown(f"**Ưu tiên (ensemble):** {ensemble[0]}")
+            else:
+                st.info("Không đủ dữ liệu để gợi ý ensemble.")
 
 with rule_tab:
     st.markdown(
@@ -271,9 +298,7 @@ with rule_tab:
         """
     )
 
-    anchor_date = st.date_input(
-        "Chọn thứ 2 làm mốc", value=(datetime.date.today() - datetime.timedelta(days=datetime.date.today().weekday()))
-    )
+    anchor_date = st.date_input("Chọn thứ 2 làm mốc", value=(datetime.date.today() - datetime.timedelta(days=datetime.date.today().weekday())))
     hist_days = st.slider("Số ngày lịch sử để thống kê", 7, 90, 30)
     hist_weeks = st.slider("Số tuần lịch sử để ước tính tuần có xuất hiện", 4, 52, 12)
 
@@ -287,132 +312,119 @@ with rule_tab:
                 anchor_digit = anchor_g1[0][-4] if len(anchor_g1[0]) >= 4 else anchor_g1[0][0]
                 st.write(f"Chữ số mốc (hàng nghìn G1 ngày {anchor_date:%d-%m-%Y}): **{anchor_digit}**")
 
-            candidates = [f"{t}{anchor_digit}" for t in range(10)]
-            st.subheader("10 số (2 chữ số) kết thúc bằng mốc")
-            st.write(", ".join(candidates))
+                candidates = [f"{t}{anchor_digit}" for t in range(10)]
+                st.subheader("10 số (2 chữ số) kết thúc bằng mốc")
+                st.write(", ".join(candidates))
 
-            # Thống kê weekday cho 2 số cuối Giải ĐB nếu NẰM TRONG 10 số (kết thúc bằng mốc)
-            weekday_hits = {i: 0 for i in range(7)}
-            occurrences = []
-            total_hits = 0
-            for delta in range(hist_days):
-                d = anchor_date - datetime.timedelta(days=delta + 1)
-                try:
-                    res = fetch_xsmb(d)
-                    db = res.get("GDB", [])
-                    if not db:
-                        continue
-                    last2 = db[0][-2:]
-                    if last2 in candidates:
-                        wd = d.weekday()  # 0=Mon
-                        weekday_hits[wd] += 1
-                        total_hits += 1
-                        occurrences.append({"Ngày": d, "Thứ": wd, "2 số cuối ĐB": last2})
-                except Exception:
-                    continue
-
-            # Kiểm tra tuần hiện tại (anchor_date → anchor_date+6) xem đã xuất hiện chưa
-            current_week_hits = []
-            for offset in range(7):
-                d = anchor_date + datetime.timedelta(days=offset)
-                try:
-                    res = fetch_xsmb(d)
-                    db = res.get("GDB", [])
-                    if not db:
-                        continue
-                    last2 = db[0][-2:]
-                    if last2 in candidates:
-                        current_week_hits.append({"Ngày": d, "Thứ": d.weekday(), "2 số cuối ĐB": last2})
-                except Exception:
-                    continue
-
-            wd_names = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"]
-
-            if total_hits == 0:
-                st.info("Không có mẫu trùng mốc trong dữ liệu lịch sử đã chọn.")
-            else:
-                rows = [
-                    {"Thứ": wd_names[i], "Số lần trùng (2 số cuối ĐB thuộc 10 số mốc)": weekday_hits[i]}
-                    for i in range(7)
-                ]
-                st.subheader("Thống kê lịch sử (2 số cuối ĐB) nằm trong 10 số mốc")
-                st.table(rows)
-
-                st.subheader("Các lần xuất hiện (trong lịch sử)")
-                st.table(
-                    [
-                        {"Ngày": oc["Ngày"].strftime('%d-%m-%Y'), "Thứ": wd_names[oc["Thứ"]], "2 số cuối ĐB": oc["2 số cuối ĐB"]}
-                        for oc in sorted(occurrences, key=lambda x: x["Ngày"], reverse=True)
-                    ]
-                )
-
-            if current_week_hits:
-                st.subheader("Tuần hiện tại: đã xuất hiện")
-                st.table(
-                    [
-                        {"Ngày": h["Ngày"].strftime('%d-%m-%Y'), "Thứ": wd_names[h["Thứ"]], "2 số cuối ĐB": h["2 số cuối ĐB"]}
-                        for h in sorted(current_week_hits, key=lambda x: x["Ngày"], reverse=True)
-                    ]
-                )
-            else:
-                st.info("Tuần hiện tại: chưa thấy 2 số cuối ĐB thuộc 10 số mốc.")
-
-            # Ước tính xác suất tuần có xuất hiện (dựa trên hist_weeks tuần quá khứ)
-            week_hits = 0
-            for w in range(hist_weeks):
-                week_start = anchor_date - datetime.timedelta(days=7 * (w + 1))
-                week_end = week_start + datetime.timedelta(days=6)
-                hit_week = False
-                for delta in range(7):
-                    d = week_start + datetime.timedelta(days=delta)
+                # Thống kê weekday cho 2 số cuối Giải ĐB nếu NẰM TRONG 10 số (kết thúc bằng mốc)
+                weekday_hits = {i: 0 for i in range(7)}
+                occurrences = []
+                total_hits = 0
+                for delta in range(hist_days):
+                    d = anchor_date - datetime.timedelta(days=delta+1)
                     try:
                         res = fetch_xsmb(d)
                         db = res.get("GDB", [])
-                        if db and db[0][-2:] in candidates:
-                            hit_week = True
-                            break
+                        if not db:
+                            continue
+                        last2 = db[0][-2:]
+                        if last2 in candidates:
+                            wd = d.weekday()  # 0=Mon
+                            weekday_hits[wd] += 1
+                            total_hits += 1
+                            occurrences.append({"Ngày": d, "Thứ": wd, "2 số cuối ĐB": last2})
                     except Exception:
                         continue
-                if hit_week:
-                    week_hits += 1
-            prob = week_hits / hist_weeks if hist_weeks > 0 else 0
-            st.subheader("Xác suất tuần có xuất hiện (ước tính)")
-            st.write(f"Trong {hist_weeks} tuần gần nhất: {week_hits} tuần có xuất hiện ⇒ xác suất lịch sử ~ {prob:.0%}")
 
-            # Gợi ý cho các ngày còn lại trong tuần hiện tại (chỉ nếu tuần mốc là tuần hiện tại)
-            start_week = anchor_date
-            end_week = anchor_date + datetime.timedelta(days=6)
-            today = datetime.date.today()
-            is_current_week = start_week <= today <= end_week
+                # Kiểm tra tuần hiện tại (anchor_date → anchor_date+6) xem đã xuất hiện chưa
+                current_week_hits = []
+                for offset in range(7):
+                    d = anchor_date + datetime.timedelta(days=offset)
+                    try:
+                        res = fetch_xsmb(d)
+                        db = res.get("GDB", [])
+                        if not db:
+                            continue
+                        last2 = db[0][-2:]
+                        if last2 in candidates:
+                            current_week_hits.append({"Ngày": d, "Thứ": d.weekday(), "2 số cuối ĐB": last2})
+                    except Exception:
+                        continue
 
-            if is_current_week and any(weekday_hits.values()):
-                best_wd_overall = max(weekday_hits, key=weekday_hits.get)
-                today_wd = today.weekday()
-                remaining = [d for d in range(today_wd, 7)]
-                ordered = sorted(range(7), key=lambda i: (-weekday_hits[i], i))
-                pick_wd = None
-                for cand in ordered:
-                    if cand in remaining and weekday_hits[cand] > 0:
-                        pick_wd = cand
-                        break
-                if pick_wd is None and weekday_hits[best_wd_overall] > 0 and best_wd_overall in remaining:
-                    pick_wd = best_wd_overall
-                if pick_wd is not None:
-                    st.success(
-                        f"Gợi ý tuần này (các ngày còn lại): ưu tiên {wd_names[pick_wd]} (dựa trên lịch sử {hist_days} ngày; khả năng tuần có xuất hiện ≈ {prob:.0%})."
-                    )
+                wd_names = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"]
+
+                if total_hits == 0:
+                    st.info("Không có mẫu trùng mốc trong dữ liệu lịch sử đã chọn.")
+                else:
+                    rows = [
+                        {"Thứ": wd_names[i], "Số lần trùng (2 số cuối ĐB thuộc 10 số mốc)": weekday_hits[i]}
+                        for i in range(7)
+                    ]
+                    st.subheader("Thống kê lịch sử (2 số cuối ĐB) nằm trong 10 số mốc")
+                    st.table(rows)
+
+                    st.subheader("Các lần xuất hiện (trong lịch sử)")
+                    st.table([
+                        {"Ngày": oc["Ngày"].strftime('%d-%m-%Y'), "Thứ": wd_names[oc["Thứ"]], "2 số cuối ĐB": oc["2 số cuối ĐB"]}
+                        for oc in sorted(occurrences, key=lambda x: x["Ngày"], reverse=True)
+                    ])
+
+                    if current_week_hits:
+                        st.subheader("Tuần hiện tại: đã xuất hiện")
+                        st.table([
+                            {"Ngày": h["Ngày"].strftime('%d-%m-%Y'), "Thứ": wd_names[h["Thứ"]], "2 số cuối ĐB": h["2 số cuối ĐB"]}
+                            for h in sorted(current_week_hits, key=lambda x: x["Ngày"], reverse=True)
+                        ])
+                    else:
+                        st.info("Tuần hiện tại: chưa thấy 2 số cuối ĐB thuộc 10 số mốc.")
+
+                    # Ước tính xác suất tuần có xuất hiện (dựa trên hist_weeks tuần quá khứ)
+                    week_hits = 0
+                    for w in range(hist_weeks):
+                        week_start = anchor_date - datetime.timedelta(days=7*(w+1))
+                        week_end = week_start + datetime.timedelta(days=6)
+                        hit_week = False
+                        for delta in range(7):
+                            d = week_start + datetime.timedelta(days=delta)
+                            try:
+                                res = fetch_xsmb(d)
+                                db = res.get("GDB", [])
+                                if db and db[0][-2:] in candidates:
+                                    hit_week = True
+                                    break
+                            except Exception:
+                                continue
+                        if hit_week:
+                            week_hits += 1
+                    prob = week_hits / hist_weeks if hist_weeks > 0 else 0
+                    st.subheader("Xác suất tuần có xuất hiện (ước tính)")
+                    st.write(f"Trong {hist_weeks} tuần gần nhất: {week_hits} tuần có xuất hiện ⇒ xác suất lịch sử ~ {prob:.0%}")
+
+                    # Gợi ý cho các ngày còn lại trong tuần hiện tại (chỉ nếu tuần mốc là tuần hiện tại)
+                    start_week = anchor_date
+                    end_week = anchor_date + datetime.timedelta(days=6)
+                    today = datetime.date.today()
+                    is_current_week = start_week <= today <= end_week
+
+                    if is_current_week and any(weekday_hits.values()):
+                        best_wd_overall = max(weekday_hits, key=weekday_hits.get)
+                        today_wd = today.weekday()
+                        remaining = [d for d in range(today_wd, 7)]
+                        ordered = sorted(range(7), key=lambda i: (-weekday_hits[i], i))
+                        pick_wd = None
+                        for cand in ordered:
+                            if cand in remaining and weekday_hits[cand] > 0:
+                                pick_wd = cand
+                                break
+                        if pick_wd is None and weekday_hits[best_wd_overall] > 0 and best_wd_overall in remaining:
+                            pick_wd = best_wd_overall
+                        if pick_wd is not None:
+                            st.success(f"Gợi ý tuần này (các ngày còn lại): ưu tiên {wd_names[pick_wd]} (dựa trên lịch sử {hist_days} ngày; khả năng tuần có xuất hiện ≈ {prob:.0%}).")
+                    else:
+                        # Không hiển thị gợi ý tuần nếu không phải tuần hiện tại
+                        pass
         except Exception as e:
             st.error(f"Lỗi phân tích: {e}")
 
 st.divider()
-st.caption("Nguồn: minhngoc.net.vn (chính), xoso.com.vn (dự phòng). Nếu nguồn đổi cấu trúc, cần chỉnh parser. Có retry + cache.")
-
-
-# -------- Minimal self-test (manual) ---------
-if __name__ == "__main__":
-    # Quick sanity checks (does not hit network)
-    sample = {"G1": ["12345", "00001"], "GDB": ["99999"]}
-    assert normalize_last2(sample) == {"G1": ["45", "01"], "GDB": ["99"]}
-    freq = aggregate_weighted([normalize_last2(sample)], decay=0.9)
-    assert freq.get("45") and freq.get("01") and freq.get("99")
-    print("Self-test OK (no network).")
+st.caption("Nguồn: minhngoc.net.vn (chính), xoso.com.vn (dự phòng). Nếu nguồn đổi cấu trúc, cần chỉnh parser.")
